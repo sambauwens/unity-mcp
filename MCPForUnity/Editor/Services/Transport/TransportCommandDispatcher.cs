@@ -153,8 +153,6 @@ namespace MCPForUnity.Editor.Services.Transport
                 }
             }
 
-            // Best-effort nudge: if we're posting from a background thread (e.g., websocket receive),
-            // encourage Unity to run a loop iteration so the posted callback can execute even when unfocused.
             try { EditorApplication.QueuePlayerLoopUpdate(); } catch { }
 
             if (_mainThreadContext != null && Thread.CurrentThread.ManagedThreadId != _mainThreadId)
@@ -169,28 +167,14 @@ namespace MCPForUnity.Editor.Services.Transport
 
         private static void RequestMainThreadPump()
         {
-            void Pump()
-            {
-                try
-                {
-                    // Hint Unity to run a loop iteration soon.
-                    EditorApplication.QueuePlayerLoopUpdate();
-                }
-                catch
-                {
-                    // Best-effort only.
-                }
-
-                ProcessQueue();
-            }
-
             if (_mainThreadContext != null && Thread.CurrentThread.ManagedThreadId != _mainThreadId)
             {
-                _mainThreadContext.Post(_ => Pump(), null);
+                _mainThreadContext.Post(_ => ProcessQueue(), null);
+                try { EditorApplication.QueuePlayerLoopUpdate(); } catch { }
                 return;
             }
 
-            Pump();
+            ProcessQueue();
         }
 
         private static void EnsureInitialised()
@@ -270,6 +254,9 @@ namespace MCPForUnity.Editor.Services.Transport
 
         private static void ProcessCommand(string id, PendingCommand pending)
         {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var queueMs = (DateTime.UtcNow - pending.QueuedAt).TotalMilliseconds;
+
             if (pending.CancellationToken.IsCancellationRequested)
             {
                 RemovePending(id, pending);
@@ -375,6 +362,11 @@ namespace MCPForUnity.Editor.Services.Transport
 
                 var response = new { status = "success", result };
                 pending.TrySetResult(JsonConvert.SerializeObject(response));
+                sw.Stop();
+                if (sw.ElapsedMilliseconds > 100 || queueMs > 50)
+                {
+                    McpLog.Info($"[PERF] {command.type}: queue={queueMs:F0}ms exec={sw.ElapsedMilliseconds}ms");
+                }
                 RemovePending(id, pending);
             }
             catch (Exception ex)

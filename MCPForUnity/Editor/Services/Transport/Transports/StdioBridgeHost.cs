@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using MCPForUnity.Editor.Constants;
@@ -21,33 +22,22 @@ using UnityEngine;
 
 namespace MCPForUnity.Editor.Services.Transport.Transports
 {
-    class QueuedCommand
-    {
-        public string CommandJson;
-        public TaskCompletionSource<string> Tcs;
-        public bool IsExecuting;
-        public long EnqueuedAtMs;
-    }
-
     [InitializeOnLoad]
     public static class StdioBridgeHost
     {
         private static TcpListener listener;
         private static bool isRunning = false;
-        private static readonly object lockObj = new();
         private static readonly object startStopLock = new();
         private static readonly object clientsLock = new();
         private static readonly HashSet<TcpClient> activeClients = new();
         private static CancellationTokenSource cts;
         private static Task listenerTask;
-        private static int processingCommands = 0;
         private static bool initScheduled = false;
         private static bool ensureUpdateHooked = false;
         private static bool isStarting = false;
         private static double nextStartAt = 0.0f;
         private static double nextHeartbeatAt = 0.0f;
         private static int heartbeatSeq = 0;
-        private static Dictionary<string, QueuedCommand> commandQueue = new();
         private static int mainThreadId;
         private static int currentUnityPort = 6400;
         private static bool isAutoConnectMode = false;
@@ -55,7 +45,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
         private const int FrameIOTimeoutMs = 30000;
         private static readonly Stopwatch _uptime = Stopwatch.StartNew();
         private static volatile int _consecutiveTimeouts = 0;
-        private static bool _processCommandsHooked = false;
 
         private static void IoInfo(string s) { McpLog.Info(s, always: false); }
 
@@ -312,13 +301,13 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     cts = new CancellationTokenSource();
                     listenerTask = Task.Run(() => ListenerLoopAsync(cts.Token));
                     CommandRegistry.Initialize();
-                    if (!_processCommandsHooked)
-                    {
-                        _processCommandsHooked = true;
-                        EditorApplication.update += ProcessCommands;
-                    }
                     try { EditorApplication.quitting -= Stop; } catch { }
                     try { EditorApplication.quitting += Stop; } catch { }
+                    try { EditorApplication.update -= TickHeartbeat; EditorApplication.update += TickHeartbeat; } catch { }
+                    try { ApplyNoThrottling(); } catch (Exception ex) { McpLog.Warn($"ApplyNoThrottling failed: {ex}"); }
+#if UNITY_EDITOR_OSX
+                    try { BeginAppNapPrevention(); } catch (Exception ex) { McpLog.Warn($"BeginAppNapPrevention failed: {ex}"); }
+#endif
                     heartbeatSeq++;
                     WriteHeartbeat(false, "ready");
                     nextHeartbeatAt = EditorApplication.timeSinceStartup + 0.5f;
@@ -341,6 +330,12 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             // The ExclusiveAddressUse flag prevents this; port-busy conflicts are
             // handled by the retry/fallback logic in Start() and the reload handler.
             try { newListener.Server.ExclusiveAddressUse = true; } catch { }
+
+            // Prevent AssetImportWorker child processes from inheriting this socket.
+            // Without FD_CLOEXEC, forked workers inherit the listening FD and may
+            // accept MCP connections that should go to the main editor, causing
+            // timeouts because workers have no command processing loop.
+            SetCloseOnExec(newListener.Server);
 #endif
             try
             {
@@ -351,6 +346,115 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             }
             return newListener;
         }
+
+#if UNITY_EDITOR_OSX
+        [DllImport("libc", SetLastError = true)]
+        private static extern int fcntl(int fd, int cmd, int arg);
+
+        private const int F_GETFD = 1;
+        private const int F_SETFD = 2;
+        private const int FD_CLOEXEC = 1;
+
+        private static void SetCloseOnExec(Socket socket)
+        {
+            try
+            {
+                int fd = (int)socket.Handle;
+                int flags = fcntl(fd, F_GETFD, 0);
+                if (flags >= 0)
+                {
+                    fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+                }
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to set FD_CLOEXEC on listener socket: {ex.Message}");
+            }
+        }
+
+        // --- App Nap prevention via NSProcessInfo.beginActivityWithOptions:reason: ---
+        // macOS App Nap throttles unfocused apps to ~10 Hz, causing 100-200ms MCP latency.
+        // beginActivity tells the OS this process is doing latency-critical work.
+
+        [DllImport("libobjc.dylib", EntryPoint = "objc_getClass")]
+        private static extern IntPtr objc_getClass(string className);
+
+        [DllImport("libobjc.dylib", EntryPoint = "sel_registerName")]
+        private static extern IntPtr sel_registerName(string name);
+
+        [DllImport("libobjc.dylib", EntryPoint = "objc_msgSend")]
+        private static extern IntPtr objc_msgSend_ptr(IntPtr receiver, IntPtr selector);
+
+        [DllImport("libobjc.dylib", EntryPoint = "objc_msgSend")]
+        private static extern IntPtr objc_msgSend_ptr_ulong_ptr(IntPtr receiver, IntPtr selector, ulong options, IntPtr reason);
+
+        [DllImport("libobjc.dylib", EntryPoint = "objc_msgSend")]
+        private static extern void objc_msgSend_void_ptr(IntPtr receiver, IntPtr selector, IntPtr arg);
+
+        [DllImport("libobjc.dylib", EntryPoint = "objc_msgSend")]
+        private static extern IntPtr objc_msgSend_ptr_byteptr(IntPtr receiver, IntPtr selector,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string arg);
+
+        private static IntPtr _appNapActivity = IntPtr.Zero;
+
+        private static void BeginAppNapPrevention()
+        {
+            try
+            {
+                if (_appNapActivity != IntPtr.Zero) return;
+
+                IntPtr processInfoClass = objc_getClass("NSProcessInfo");
+                IntPtr processInfoSel = sel_registerName("processInfo");
+                IntPtr processInfo = objc_msgSend_ptr(processInfoClass, processInfoSel);
+
+                // Create NSString for reason
+                IntPtr nsStringClass = objc_getClass("NSString");
+                IntPtr stringWithUTF8Sel = sel_registerName("stringWithUTF8String:");
+                IntPtr reason = objc_msgSend_ptr_byteptr(nsStringClass, stringWithUTF8Sel,
+                    "MCP bridge requires low-latency editor loop");
+
+                // NSActivityUserInitiatedAllowingIdleSystemSleep = 0x00FFFFFFULL
+                // This includes NSActivityLatencyCritical and prevents App Nap.
+                const ulong NSActivityUserInitiatedAllowingIdleSystemSleep = 0x00FFFFFFUL;
+
+                IntPtr beginActivitySel = sel_registerName("beginActivityWithOptions:reason:");
+                _appNapActivity = objc_msgSend_ptr_ulong_ptr(
+                    processInfo, beginActivitySel,
+                    NSActivityUserInitiatedAllowingIdleSystemSleep, reason);
+
+                if (_appNapActivity != IntPtr.Zero)
+                {
+                    UnityEngine.Debug.LogWarning("[MCP] App Nap prevention active (beginActivity)");
+                }
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to begin App Nap prevention: {ex.Message}");
+            }
+        }
+
+        private static void EndAppNapPrevention()
+        {
+            try
+            {
+                if (_appNapActivity == IntPtr.Zero) return;
+
+                IntPtr processInfoClass = objc_getClass("NSProcessInfo");
+                IntPtr processInfoSel = sel_registerName("processInfo");
+                IntPtr processInfo = objc_msgSend_ptr(processInfoClass, processInfoSel);
+
+                IntPtr endActivitySel = sel_registerName("endActivity:");
+                objc_msgSend_void_ptr(processInfo, endActivitySel, _appNapActivity);
+
+                _appNapActivity = IntPtr.Zero;
+                McpLog.Info("App Nap prevention ended");
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to end App Nap prevention: {ex.Message}");
+            }
+        }
+#endif
 
         public static void Stop()
         {
@@ -400,10 +504,11 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                 try { toWait.Wait(500); } catch { }
             }
 
-            // ProcessCommands stays permanently hooked (guarded by _processCommandsHooked)
-            // to eliminate the registration gap between Stop and Start during domain reload.
-            // ProcessCommands already exits early when !isRunning.
             try { EditorApplication.quitting -= Stop; } catch { }
+            RestoreThrottling();
+#if UNITY_EDITOR_OSX
+            try { EndAppNapPrevention(); } catch { }
+#endif
 
             try
             {
@@ -539,9 +644,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                                 }
                             }
                             catch { }
-                            string commandId = Guid.NewGuid().ToString();
-                            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-
                             if (commandText.Trim() == "ping")
                             {
                                 byte[] pingResponseBytes = System.Text.Encoding.UTF8.GetBytes(
@@ -551,44 +653,26 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                                 continue;
                             }
 
-                            lock (lockObj)
-                            {
-                                commandQueue[commandId] = new QueuedCommand
-                                {
-                                    CommandJson = commandText,
-                                    Tcs = tcs,
-                                    IsExecuting = false,
-                                    EnqueuedAtMs = _uptime.ElapsedMilliseconds
-                                };
-                            }
-
-                            // Force Unity's main loop to iterate even when backgrounded,
-                            // so ProcessCommands fires and picks up the queued command.
-                            // This mirrors what HTTP does via TransportCommandDispatcher.RequestMainThreadPump().
-                            try { EditorApplication.QueuePlayerLoopUpdate(); } catch { }
-
+                            // Dispatch directly through TransportCommandDispatcher (same path as WebSocket transport).
+                            // This avoids the intermediate commandQueue + ProcessCommands (EditorApplication.update)
+                            // layer which added 100-200ms of latency waiting for the next editor frame.
                             string response;
                             try
                             {
                                 using var respCts = new CancellationTokenSource(FrameIOTimeoutMs);
-                                var completed = await Task.WhenAny(tcs.Task, Task.Delay(FrameIOTimeoutMs, respCts.Token)).ConfigureAwait(false);
-                                if (completed == tcs.Task)
+                                response = await TransportCommandDispatcher.ExecuteCommandJsonAsync(commandText, respCts.Token).ConfigureAwait(false);
+                                Interlocked.Exchange(ref _consecutiveTimeouts, 0);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                int timeouts = Interlocked.Increment(ref _consecutiveTimeouts);
+                                McpLog.Warn($"Command timed out ({timeouts} consecutive)");
+                                var timeoutResponse = new
                                 {
-                                    respCts.Cancel();
-                                    response = tcs.Task.Result;
-                                    Interlocked.Exchange(ref _consecutiveTimeouts, 0);
-                                }
-                                else
-                                {
-                                    int timeouts = Interlocked.Increment(ref _consecutiveTimeouts);
-                                    McpLog.Warn($"Command TCS timed out ({timeouts} consecutive)");
-                                    var timeoutResponse = new
-                                    {
-                                        status = "error",
-                                        error = $"Command processing timed out after {FrameIOTimeoutMs} ms",
-                                    };
-                                    response = JsonConvert.SerializeObject(timeoutResponse);
-                                }
+                                    status = "error",
+                                    error = $"Command processing timed out after {FrameIOTimeoutMs} ms",
+                                };
+                                response = JsonConvert.SerializeObject(timeoutResponse);
                             }
                             catch (Exception ex)
                             {
@@ -775,162 +859,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             dest[7] = (byte)(value);
         }
 
-        private static void ProcessCommands()
-        {
-            if (!isRunning) return;
-            if (Interlocked.Exchange(ref processingCommands, 1) == 1) return;
-            try
-            {
-                double now = EditorApplication.timeSinceStartup;
-                if (now >= nextHeartbeatAt)
-                {
-                    WriteHeartbeat(false);
-                    nextHeartbeatAt = now + 0.5f;
-                }
-
-                List<(string id, QueuedCommand command)> work;
-                lock (lockObj)
-                {
-                    // Early exit inside lock to prevent per-frame List allocations (GitHub issue #577)
-                    if (commandQueue.Count == 0)
-                    {
-                        return;
-                    }
-
-                    // Evict commands stuck with IsExecuting=true for too long (e.g. from pre-reload state).
-                    long nowMs = _uptime.ElapsedMilliseconds;
-                    const long staleThresholdMs = 2L * FrameIOTimeoutMs; // 60s
-                    List<string> staleIds = null;
-                    foreach (var kvp in commandQueue)
-                    {
-                        if (kvp.Value.IsExecuting && (nowMs - kvp.Value.EnqueuedAtMs) > staleThresholdMs)
-                        {
-                            staleIds ??= new List<string>();
-                            staleIds.Add(kvp.Key);
-                        }
-                    }
-                    if (staleIds != null)
-                    {
-                        foreach (var sid in staleIds)
-                        {
-                            var staleCmd = commandQueue[sid];
-                            commandQueue.Remove(sid);
-                            var err = new { status = "error", error = "Command evicted: stuck too long in queue" };
-                            try { staleCmd.Tcs.TrySetResult(JsonConvert.SerializeObject(err)); } catch { }
-                        }
-                        McpLog.Info($"Evicted {staleIds.Count} stale command(s) from queue");
-                    }
-
-                    work = new List<(string, QueuedCommand)>(commandQueue.Count);
-                    foreach (var kvp in commandQueue)
-                    {
-                        var queued = kvp.Value;
-                        if (queued.IsExecuting) continue;
-                        queued.IsExecuting = true;
-                        work.Add((kvp.Key, queued));
-                    }
-                }
-
-                foreach (var item in work)
-                {
-                    string id = item.id;
-                    QueuedCommand queuedCommand = item.command;
-                    string commandText = queuedCommand.CommandJson;
-                    TaskCompletionSource<string> tcs = queuedCommand.Tcs;
-
-                    if (string.IsNullOrWhiteSpace(commandText))
-                    {
-                        var emptyResponse = new
-                        {
-                            status = "error",
-                            error = "Empty command received",
-                        };
-                        tcs.SetResult(JsonConvert.SerializeObject(emptyResponse));
-                        lock (lockObj) { commandQueue.Remove(id); }
-                        continue;
-                    }
-
-                    commandText = commandText.Trim();
-                    if (commandText == "ping")
-                    {
-                        var pingResponse = new
-                        {
-                            status = "success",
-                            result = new { message = "pong" },
-                        };
-                        tcs.SetResult(JsonConvert.SerializeObject(pingResponse));
-                        lock (lockObj) { commandQueue.Remove(id); }
-                        continue;
-                    }
-
-                    if (!IsValidJson(commandText))
-                    {
-                        var invalidJsonResponse = new
-                        {
-                            status = "error",
-                            error = "Invalid JSON format",
-                            receivedText = commandText.Length > 50
-                                ? commandText[..50] + "..."
-                                : commandText,
-                        };
-                        tcs.SetResult(JsonConvert.SerializeObject(invalidJsonResponse));
-                        lock (lockObj) { commandQueue.Remove(id); }
-                        continue;
-                    }
-
-                    ExecuteQueuedCommand(id, commandText, tcs);
-                }
-            }
-            finally
-            {
-                Interlocked.Exchange(ref processingCommands, 0);
-            }
-        }
-
-        private static void ExecuteQueuedCommand(string commandId, string payload, TaskCompletionSource<string> completionSource)
-        {
-            async void Runner()
-            {
-                try
-                {
-                    using var cts = new CancellationTokenSource(FrameIOTimeoutMs);
-                    string response = await TransportCommandDispatcher.ExecuteCommandJsonAsync(payload, cts.Token).ConfigureAwait(true);
-                    completionSource.TrySetResult(response);
-                }
-                catch (OperationCanceledException)
-                {
-                    var timeoutResponse = new
-                    {
-                        status = "error",
-                        error = $"Command processing timed out after {FrameIOTimeoutMs} ms",
-                    };
-                    completionSource.TrySetResult(JsonConvert.SerializeObject(timeoutResponse));
-                }
-                catch (Exception ex)
-                {
-                    McpLog.Error($"Error processing command: {ex.Message}\n{ex.StackTrace}");
-                    var response = new
-                    {
-                        status = "error",
-                        error = ex.Message,
-                        receivedText = payload?.Length > 50
-                            ? payload[..50] + "..."
-                            : payload,
-                    };
-                    completionSource.TrySetResult(JsonConvert.SerializeObject(response));
-                }
-                finally
-                {
-                    lock (lockObj)
-                    {
-                        commandQueue.Remove(commandId);
-                    }
-                }
-            }
-
-            Runner();
-        }
-
         private static object InvokeOnMainThreadWithTimeout(Func<object> func, int timeoutMs)
         {
             if (func == null) return null;
@@ -1014,6 +942,90 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             return false;
         }
 
+
+        private const string InteractionModeKey = "InteractionMode";
+        private const string ApplicationIdleTimeKey = "ApplicationIdleTime";
+        private const string SessionKey_PrevInteractionMode = "StdioBridge_PrevInteractionMode";
+        private const string SessionKey_PrevIdleTime = "StdioBridge_PrevIdleTime";
+        private const string SessionKey_ThrottleOverrideActive = "StdioBridge_ThrottleOverrideActive";
+
+        private static void ApplyNoThrottling()
+        {
+            try
+            {
+                int currentMode = EditorPrefs.GetInt(InteractionModeKey, 0);
+                int currentIdle = EditorPrefs.GetInt(ApplicationIdleTimeKey, 4);
+
+                // Only save original values on first activation (not after domain reload)
+                if (!SessionState.GetBool(SessionKey_ThrottleOverrideActive, false))
+                {
+                    SessionState.SetInt(SessionKey_PrevInteractionMode, currentMode);
+                    SessionState.SetInt(SessionKey_PrevIdleTime, currentIdle);
+                    SessionState.SetBool(SessionKey_ThrottleOverrideActive, true);
+                }
+
+                // Always set prefs AND force-apply, even if already set.
+                // After domain reload, Unity resets internal throttling state even though
+                // EditorPrefs persist — UpdateInteractionModeSettings must be called again.
+                EditorPrefs.SetInt(InteractionModeKey, 1);
+                EditorPrefs.SetInt(ApplicationIdleTimeKey, 0);
+
+                var method = typeof(EditorApplication).GetMethod(
+                    "UpdateInteractionModeSettings",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                if (method != null)
+                {
+                    method.Invoke(null, null);
+                    UnityEngine.Debug.LogWarning("[MCP] Applied No Throttling for MCP responsiveness (InteractionMode=1, IdleTime=0)");
+                }
+                else
+                {
+                    McpLog.Warn("UpdateInteractionModeSettings not found — No Throttling may not take effect until Unity restart");
+                }
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to apply No Throttling: {ex.Message}");
+            }
+        }
+
+        private static void RestoreThrottling()
+        {
+            try
+            {
+                if (!SessionState.GetBool(SessionKey_ThrottleOverrideActive, false))
+                    return;
+
+                int prevMode = SessionState.GetInt(SessionKey_PrevInteractionMode, 0);
+                int prevIdle = SessionState.GetInt(SessionKey_PrevIdleTime, 4);
+
+                EditorPrefs.SetInt(InteractionModeKey, prevMode);
+                EditorPrefs.SetInt(ApplicationIdleTimeKey, prevIdle);
+
+                var method = typeof(EditorApplication).GetMethod(
+                    "UpdateInteractionModeSettings",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                method?.Invoke(null, null);
+
+                SessionState.SetBool(SessionKey_ThrottleOverrideActive, false);
+                McpLog.Info("Restored Interaction Mode after MCP bridge stop");
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to restore Interaction Mode: {ex.Message}");
+            }
+        }
+
+        private static void TickHeartbeat()
+        {
+            if (!isRunning) return;
+            double now = EditorApplication.timeSinceStartup;
+            if (now >= nextHeartbeatAt)
+            {
+                WriteHeartbeat(false);
+                nextHeartbeatAt = now + 0.5f;
+            }
+        }
 
         public static void WriteHeartbeat(bool reloading, string reason = null)
         {
