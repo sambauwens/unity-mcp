@@ -305,9 +305,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     try { EditorApplication.quitting += Stop; } catch { }
                     try { EditorApplication.update -= TickHeartbeat; EditorApplication.update += TickHeartbeat; } catch { }
                     try { ApplyNoThrottling(); } catch (Exception ex) { McpLog.Warn($"ApplyNoThrottling failed: {ex}"); }
-#if UNITY_EDITOR_OSX
-                    try { BeginAppNapPrevention(); } catch (Exception ex) { McpLog.Warn($"BeginAppNapPrevention failed: {ex}"); }
-#endif
                     heartbeatSeq++;
                     WriteHeartbeat(false, "ready");
                     nextHeartbeatAt = EditorApplication.timeSinceStartup + 0.5f;
@@ -372,88 +369,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             }
         }
 
-        // --- App Nap prevention via NSProcessInfo.beginActivityWithOptions:reason: ---
-        // macOS App Nap throttles unfocused apps to ~10 Hz, causing 100-200ms MCP latency.
-        // beginActivity tells the OS this process is doing latency-critical work.
-
-        [DllImport("libobjc.dylib", EntryPoint = "objc_getClass")]
-        private static extern IntPtr objc_getClass(string className);
-
-        [DllImport("libobjc.dylib", EntryPoint = "sel_registerName")]
-        private static extern IntPtr sel_registerName(string name);
-
-        [DllImport("libobjc.dylib", EntryPoint = "objc_msgSend")]
-        private static extern IntPtr objc_msgSend_ptr(IntPtr receiver, IntPtr selector);
-
-        [DllImport("libobjc.dylib", EntryPoint = "objc_msgSend")]
-        private static extern IntPtr objc_msgSend_ptr_ulong_ptr(IntPtr receiver, IntPtr selector, ulong options, IntPtr reason);
-
-        [DllImport("libobjc.dylib", EntryPoint = "objc_msgSend")]
-        private static extern void objc_msgSend_void_ptr(IntPtr receiver, IntPtr selector, IntPtr arg);
-
-        [DllImport("libobjc.dylib", EntryPoint = "objc_msgSend")]
-        private static extern IntPtr objc_msgSend_ptr_byteptr(IntPtr receiver, IntPtr selector,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string arg);
-
-        private static IntPtr _appNapActivity = IntPtr.Zero;
-
-        private static void BeginAppNapPrevention()
-        {
-            try
-            {
-                if (_appNapActivity != IntPtr.Zero) return;
-
-                IntPtr processInfoClass = objc_getClass("NSProcessInfo");
-                IntPtr processInfoSel = sel_registerName("processInfo");
-                IntPtr processInfo = objc_msgSend_ptr(processInfoClass, processInfoSel);
-
-                // Create NSString for reason
-                IntPtr nsStringClass = objc_getClass("NSString");
-                IntPtr stringWithUTF8Sel = sel_registerName("stringWithUTF8String:");
-                IntPtr reason = objc_msgSend_ptr_byteptr(nsStringClass, stringWithUTF8Sel,
-                    "MCP bridge requires low-latency editor loop");
-
-                // NSActivityUserInitiatedAllowingIdleSystemSleep = 0x00FFFFFFULL
-                // This includes NSActivityLatencyCritical and prevents App Nap.
-                const ulong NSActivityUserInitiatedAllowingIdleSystemSleep = 0x00FFFFFFUL;
-
-                IntPtr beginActivitySel = sel_registerName("beginActivityWithOptions:reason:");
-                _appNapActivity = objc_msgSend_ptr_ulong_ptr(
-                    processInfo, beginActivitySel,
-                    NSActivityUserInitiatedAllowingIdleSystemSleep, reason);
-
-                if (_appNapActivity != IntPtr.Zero)
-                {
-                    UnityEngine.Debug.LogWarning("[MCP] App Nap prevention active (beginActivity)");
-                }
-            }
-            catch (Exception ex)
-            {
-                McpLog.Warn($"Failed to begin App Nap prevention: {ex.Message}");
-            }
-        }
-
-        private static void EndAppNapPrevention()
-        {
-            try
-            {
-                if (_appNapActivity == IntPtr.Zero) return;
-
-                IntPtr processInfoClass = objc_getClass("NSProcessInfo");
-                IntPtr processInfoSel = sel_registerName("processInfo");
-                IntPtr processInfo = objc_msgSend_ptr(processInfoClass, processInfoSel);
-
-                IntPtr endActivitySel = sel_registerName("endActivity:");
-                objc_msgSend_void_ptr(processInfo, endActivitySel, _appNapActivity);
-
-                _appNapActivity = IntPtr.Zero;
-                McpLog.Info("App Nap prevention ended");
-            }
-            catch (Exception ex)
-            {
-                McpLog.Warn($"Failed to end App Nap prevention: {ex.Message}");
-            }
-        }
 #endif
 
         public static void Stop()
@@ -506,9 +421,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
 
             try { EditorApplication.quitting -= Stop; } catch { }
             RestoreThrottling();
-#if UNITY_EDITOR_OSX
-            try { EndAppNapPrevention(); } catch { }
-#endif
 
             try
             {
