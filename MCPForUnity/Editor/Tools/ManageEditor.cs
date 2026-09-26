@@ -124,6 +124,19 @@ namespace MCPForUnity.Editor.Tools
                     if (!removeLayerResult.IsSuccess)
                         return new ErrorResponse(removeLayerResult.ErrorMessage);
                     return RemoveLayer(removeLayerResult.Value);
+                // Editor Lifecycle
+                case "quit":
+                    try
+                    {
+                        EditorApplication.isPlaying = false;
+                        EditorApplication.Exit(0);
+                        return new SuccessResponse("Quit initiated — Unity is shutting down.");
+                    }
+                    catch (Exception e)
+                    {
+                        return new ErrorResponse($"Error quitting editor: {e.Message}");
+                    }
+
                 // --- Settings (Example) ---
                 // case "set_resolution":
                 //     int? width = @params["width"]?.ToObject<int?>();
@@ -136,7 +149,7 @@ namespace MCPForUnity.Editor.Tools
 
                 default:
                     return new ErrorResponse(
-                        $"Unknown action: '{action}'. Supported actions: play, pause, stop, set_active_tool, add_tag, remove_tag, add_layer, remove_layer. Use MCP resources for reading editor state, project info, tags, layers, selection, windows, prefab stage, and active tool."
+                        $"Unknown action: '{action}'. Supported actions: play, pause, stop, quit, set_active_tool, add_tag, remove_tag, add_layer, remove_layer. Use MCP resources for reading editor state, project info, tags, layers, selection, windows, prefab stage, and active tool."
                     );
             }
         }

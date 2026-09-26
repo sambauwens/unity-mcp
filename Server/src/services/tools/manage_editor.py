@@ -12,14 +12,14 @@ from services.tools.utils import coerce_bool
 
 
 @mcp_for_unity_tool(
-    description="Controls and queries the Unity editor's state and settings. Tip: pass booleans as true/false; if your client only sends strings, 'true'/'false' are accepted. Read-only actions: telemetry_status, telemetry_ping. Modifying actions: play, pause, stop, set_active_tool, add_tag, remove_tag, add_layer, remove_layer.",
+    description="Controls and queries the Unity editor's state and settings. Tip: pass booleans as true/false; if your client only sends strings, 'true'/'false' are accepted. Read-only actions: telemetry_status, telemetry_ping. Modifying actions: play, pause, stop, quit, set_active_tool, add_tag, remove_tag, add_layer, remove_layer.",
     annotations=ToolAnnotations(
         title="Manage Editor",
     ),
 )
 async def manage_editor(
     ctx: Context,
-    action: Annotated[Literal["telemetry_status", "telemetry_ping", "play", "pause", "stop", "set_active_tool", "add_tag", "remove_tag", "add_layer", "remove_layer"], "Get and update the Unity Editor state."],
+    action: Annotated[Literal["telemetry_status", "telemetry_ping", "play", "pause", "stop", "quit", "set_active_tool", "add_tag", "remove_tag", "add_layer", "remove_layer"], "Get and update the Unity Editor state."],
     wait_for_completion: Annotated[bool | str,
                                    "Optional. If True, waits for certain actions (accepts true/false or 'true'/'false')"] | None = None,
     tool_name: Annotated[str,
