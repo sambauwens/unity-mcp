@@ -15,6 +15,7 @@ from services.tools.utils import coerce_bool
     description="Controls and queries the Unity editor's state and settings. Tip: pass booleans as true/false; if your client only sends strings, 'true'/'false' are accepted. Read-only actions: telemetry_status, telemetry_ping. Modifying actions: play, pause, stop, quit, set_active_tool, add_tag, remove_tag, add_layer, remove_layer.",
     annotations=ToolAnnotations(
         title="Manage Editor",
+        destructiveHint=True,  # "quit" closes the editor
     ),
 )
 async def manage_editor(
@@ -28,6 +29,8 @@ async def manage_editor(
                         "Tag name when adding and removing tags"] | None = None,
     layer_name: Annotated[str,
                           "Layer name when adding and removing layers"] | None = None,
+    force: Annotated[bool | str,
+                     "quit only: close even if open scenes have unsaved changes (they are lost)"] | None = None,
 ) -> dict[str, Any]:
     # Get active instance from request state (injected by middleware)
     unity_instance = await get_unity_instance_from_context(ctx)
@@ -49,6 +52,7 @@ async def manage_editor(
             "toolName": tool_name,
             "tagName": tag_name,
             "layerName": layer_name,
+            "force": coerce_bool(force) if force is not None else None,
         }
         params = {k: v for k, v in params.items() if v is not None}
 

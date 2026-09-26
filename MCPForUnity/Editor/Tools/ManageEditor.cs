@@ -128,6 +128,19 @@ namespace MCPForUnity.Editor.Tools
                 case "quit":
                     try
                     {
+                        // Exit(0) skips Unity's save prompt: refuse while scenes have unsaved changes
+                        // unless the caller explicitly passes force=true.
+                        if (!p.GetBool("force", false))
+                        {
+                            for (int i = 0; i < UnityEditor.SceneManagement.EditorSceneManager.sceneCount; i++)
+                            {
+                                var scene = UnityEditor.SceneManagement.EditorSceneManager.GetSceneAt(i);
+                                if (scene.isDirty)
+                                {
+                                    return new ErrorResponse($"Not quitting: scene '{scene.path}' has unsaved changes. Save it first, or pass force=true to discard them.");
+                                }
+                            }
+                        }
                         EditorApplication.isPlaying = false;
                         EditorApplication.Exit(0);
                         return new SuccessResponse("Quit initiated — Unity is shutting down.");
