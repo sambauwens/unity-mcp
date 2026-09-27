@@ -137,3 +137,40 @@ async def test_auto_select_handles_stdio_errors(monkeypatch):
 
     assert selected is None
     assert await middleware.get_active_instance(ctx) is None
+
+
+@pytest.mark.asyncio
+async def test_auto_select_never_overrides_the_default_instance(monkeypatch):
+    # Seen 2026-09-27: a session started with --default-instance golfmini-tools-engineer-ws was pinned to
+    # another session's editor because that editor was the only one running at its first call.
+    plugin_hub = types.ModuleType("transport.plugin_hub")
+
+    class PluginHub:
+        @classmethod
+        def is_configured(cls) -> bool:
+            return False
+
+    plugin_hub.PluginHub = PluginHub
+    monkeypatch.setitem(sys.modules, "transport.plugin_hub", plugin_hub)
+    monkeypatch.delitem(sys.modules, "transport.unity_instance_middleware", raising=False)
+    monkeypatch.setenv("UNITY_MCP_DEFAULT_INSTANCE", "golfmini-tools-engineer-ws")
+    monkeypatch.setattr(config, "transport_mode", "stdio")
+
+    from transport.unity_instance_middleware import UnityInstanceMiddleware
+
+    middleware = UnityInstanceMiddleware()
+    ctx = DummyContext()
+    ctx.client_id = "client-1"
+
+    class PoolStub:
+        def discover_all_instances(self, force_refresh=False):
+            return [SimpleNamespace(id="golfmini-qa-lead-ws@38328ef8")]
+
+    unity_connection = types.ModuleType("transport.legacy.unity_connection")
+    unity_connection.get_unity_connection_pool = lambda: PoolStub()
+    monkeypatch.setitem(sys.modules, "transport.legacy.unity_connection", unity_connection)
+
+    selected = await middleware._maybe_autoselect_instance(ctx)
+
+    assert selected is None
+    assert await middleware.get_active_instance(ctx) is None

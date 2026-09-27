@@ -6,6 +6,7 @@ into the request-scoped state, allowing tools to access it via ctx.get_state("un
 """
 from threading import RLock
 import logging
+import os
 import time
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -232,6 +233,11 @@ class UnityInstanceMiddleware(Middleware):
         `set_active_instance` as a side-effect, since callers expect the selection
         to stick for subsequent tool/resource calls in the same session.
         """
+        # A configured default instance (--default-instance / UNITY_MCP_DEFAULT_INSTANCE) wins: leave the
+        # selection empty so the connection pool resolves the default. Auto-selecting "the sole running
+        # editor" here would pin this session to another project's editor whenever its own is not open.
+        if os.environ.get("UNITY_MCP_DEFAULT_INSTANCE", "").strip():
+            return None
         try:
             transport = (config.transport_mode or "stdio").lower()
             # This implicit behavior works well for solo-users, but is dangerous for multi-user setups
