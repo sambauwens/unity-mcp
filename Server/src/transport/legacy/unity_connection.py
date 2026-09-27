@@ -16,6 +16,7 @@ from typing import Any
 
 from models.models import MCPResponse, UnityInstanceInfo
 from transport.legacy.stdio_port_registry import stdio_port_registry
+from utils import editor_dialogs
 
 
 logger = logging.getLogger("mcp-for-unity-server")
@@ -468,6 +469,9 @@ class UnityConnection:
                     sleep_s = min(cap, jitter * (2 ** attempt))
                     time.sleep(sleep_s)
                     continue
+                named = editor_dialogs.timeout_error_with_dialogs(e, self.port)
+                if named is not e:
+                    raise named from e
                 raise
 
 
