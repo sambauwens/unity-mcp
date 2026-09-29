@@ -92,7 +92,8 @@ async def manage_scene(
         "scene_view_frame",
     ], "Perform CRUD operations on Unity scenes, capture screenshots, and control the Scene View camera."],
     name: Annotated[str, "Scene name."] | None = None,
-    path: Annotated[str, "Scene path."] | None = None,
+    path: Annotated[str, "Scene folder with `name` (e.g. 'Assets/scenes' + 'startup'), or a full scene "
+                         "path ('Assets/scenes/startup.unity')."] | None = None,
     build_index: Annotated[int | str,
                            "Unity build index (quote as string, e.g., '0')."] | None = None,
     # --- screenshot params ---
@@ -168,6 +169,13 @@ async def manage_scene(
         coerced_max_resolution = coerce_int(max_resolution, default=None)
         if coerced_max_resolution is not None and coerced_max_resolution <= 0:
             return {"success": False, "message": "max_resolution must be a positive integer greater than zero."}
+
+        # Unity's handler reads `path` as the scene's folder and `name` as its file: split a full
+        # scene path (Assets/scenes/startup.unity) into both, keeping an explicit name.
+        if path and path.lower().endswith(".unity"):
+            folder, _, file_name = path.replace("\\", "/").rpartition("/")
+            path = folder or "Assets"
+            name = name or file_name[:-len(".unity")]
 
         params: dict[str, Any] = {"action": action}
         if name:
