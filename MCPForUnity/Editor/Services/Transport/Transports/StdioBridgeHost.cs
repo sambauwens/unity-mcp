@@ -627,7 +627,10 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                             bool isBenign =
                                 msg.IndexOf("Connection closed before reading expected bytes", StringComparison.OrdinalIgnoreCase) >= 0
                                 || msg.IndexOf("Read timed out", StringComparison.OrdinalIgnoreCase) >= 0
-                                || ex is IOException;
+                                || ex is IOException
+                                // The bridge itself disposes a stale client's stream ("Closing N stale client(s)"), and a
+                                // domain reload tears streams down; the pending read then throws this. Upstream does the same.
+                                || ex is ObjectDisposedException;
                             if (isBenign)
                             {
                                 if (IsDebugEnabled()) McpLog.Info($"Client handler: {msg}", always: false);
