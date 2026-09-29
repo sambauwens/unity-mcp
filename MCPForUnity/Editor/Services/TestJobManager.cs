@@ -51,7 +51,9 @@ namespace MCPForUnity.Editor.Services
         // Keep this small to avoid ballooning payloads during polling.
         private const int FailureCap = 25;
         private const long StuckThresholdMs = 60_000;
-        private const long DefaultInitializationTimeoutMs = 15_000; // 15 seconds default; override per-job via run_tests init_timeout param
+        // 2 minutes default: a large project's domain reload can take well over 15s before RunStarted, and a job
+        // failed early ignores the late start while the run goes on. Override per-job via run_tests init_timeout.
+        private const long DefaultInitializationTimeoutMs = 120_000;
         private const long MaxInitializationTimeoutMs = 600_000; // 10 minutes hard cap
         private const int MaxJobsToKeep = 10;
         private const long MinPersistIntervalMs = 1000; // Throttle persistence to reduce overhead
@@ -497,7 +499,7 @@ namespace MCPForUnity.Editor.Services
 
                 // Check if job is stuck in "running" state without having called OnRunStarted (TotalTests still null).
                 // This happens when tests fail to initialize (e.g., unsaved scene, compilation issues).
-                // After 15 seconds without initialization, auto-fail the job to prevent hanging.
+                // After the init timeout without initialization, auto-fail the job to prevent hanging.
                 if (job.Status == TestJobStatus.Running && job.TotalTests == null)
                 {
                     long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();

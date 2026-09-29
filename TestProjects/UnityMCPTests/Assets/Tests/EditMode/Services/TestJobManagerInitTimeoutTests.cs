@@ -61,6 +61,8 @@ namespace MCPForUnityTests.Editor.Services
             var jobs = _jobsField.GetValue(null) as System.Collections.IDictionary;
             jobs?.Remove("test-init-timeout-job");
             jobs?.Remove("test-init-timeout-default");
+            jobs?.Remove("test-init-timeout-short");
+            jobs?.Remove("test-init-timeout-slow");
             jobs?.Remove("test-init-timeout-persist");
         }
 
@@ -68,59 +70,77 @@ namespace MCPForUnityTests.Editor.Services
         public void GetJob_WithCustomInitTimeout_UsesPerJobTimeout()
         {
             // Arrange: insert a job with a custom init timeout and a start time far enough in the
-            // past to exceed the default 15s but within the custom 120s.
-            var jobs = _jobsField.GetValue(null) as System.Collections.IDictionary;
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            // past to exceed the default 120s but within the custom 300s.
+            InsertUninitializedJob("test-init-timeout-job", "PlayMode", startedMsAgo: 200_000, initTimeoutMs: 300_000);
 
-            var job = Activator.CreateInstance(_testJobType);
-            _testJobType.GetProperty("JobId").SetValue(job, "test-init-timeout-job");
-            _testJobType.GetProperty("Status").SetValue(job, TestJobStatus.Running);
-            _testJobType.GetProperty("Mode").SetValue(job, "PlayMode");
-            _testJobType.GetProperty("StartedUnixMs").SetValue(job, now - 30_000); // 30s ago
-            _testJobType.GetProperty("LastUpdateUnixMs").SetValue(job, now - 30_000);
-            _testJobType.GetProperty("TotalTests").SetValue(job, null); // Not initialized yet
-            _testJobType.GetProperty("InitTimeoutMs").SetValue(job, 120_000L); // 120s custom timeout
-            _testJobType.GetProperty("FailuresSoFar").SetValue(job, new List<TestJobFailure>());
-
-            jobs["test-init-timeout-job"] = job;
-            _currentJobIdField.SetValue(null, "test-init-timeout-job");
-
-            // Act: GetJob should NOT auto-fail because 30s < 120s custom timeout
+            // Act: GetJob should NOT auto-fail because 200s < 300s custom timeout
             var result = _getJobMethod.Invoke(null, new object[] { "test-init-timeout-job" });
 
             // Assert: job should still be running
-            var status = (TestJobStatus)_testJobType.GetProperty("Status").GetValue(result);
-            Assert.AreEqual(TestJobStatus.Running, status,
-                "Job with 120s custom timeout should not auto-fail after 30s");
+            Assert.AreEqual(TestJobStatus.Running, StatusOf(result),
+                "Job with 300s custom timeout should not auto-fail after 200s");
         }
 
         [Test]
-        public void GetJob_WithDefaultTimeout_AutoFailsAfter15Seconds()
+        public void GetJob_WithShorterCustomTimeout_AutoFailsBeforeTheDefault()
         {
-            // Arrange: insert a job with InitTimeoutMs=0 (use default) and start time 20s ago
+            InsertUninitializedJob("test-init-timeout-short", "EditMode", startedMsAgo: 40_000, initTimeoutMs: 30_000);
+
+            var result = _getJobMethod.Invoke(null, new object[] { "test-init-timeout-short" });
+
+            Assert.AreEqual(TestJobStatus.Failed, StatusOf(result),
+                "Job with 30s custom timeout should auto-fail after 40s");
+        }
+
+        [Test]
+        public void GetJob_WithDefaultTimeout_WaitsForASlowDomainReload()
+        {
+            // A large project's domain reload can take well over 15s before RunStarted; the default
+            // must not fail such a run (the run went on anyway and its results were lost).
+            InsertUninitializedJob("test-init-timeout-slow", "EditMode", startedMsAgo: 60_000, initTimeoutMs: 0);
+
+            var result = _getJobMethod.Invoke(null, new object[] { "test-init-timeout-slow" });
+
+            Assert.AreEqual(TestJobStatus.Running, StatusOf(result),
+                "Job with default timeout should still be running after 60s");
+        }
+
+        [Test]
+        public void GetJob_WithDefaultTimeout_AutoFailsAfter120Seconds()
+        {
+            InsertUninitializedJob("test-init-timeout-default", "EditMode", startedMsAgo: 130_000, initTimeoutMs: 0);
+
+            // Act: GetJob should auto-fail because 130s > 120s default
+            var result = _getJobMethod.Invoke(null, new object[] { "test-init-timeout-default" });
+
+            // Assert: job should be failed
+            Assert.AreEqual(TestJobStatus.Failed, StatusOf(result),
+                "Job with default timeout should auto-fail after 130s");
+        }
+
+        private object InsertUninitializedJob(string jobId, string mode, long startedMsAgo, long initTimeoutMs)
+        {
             var jobs = _jobsField.GetValue(null) as System.Collections.IDictionary;
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             var job = Activator.CreateInstance(_testJobType);
-            _testJobType.GetProperty("JobId").SetValue(job, "test-init-timeout-default");
+            _testJobType.GetProperty("JobId").SetValue(job, jobId);
             _testJobType.GetProperty("Status").SetValue(job, TestJobStatus.Running);
-            _testJobType.GetProperty("Mode").SetValue(job, "EditMode");
-            _testJobType.GetProperty("StartedUnixMs").SetValue(job, now - 20_000); // 20s ago
-            _testJobType.GetProperty("LastUpdateUnixMs").SetValue(job, now - 20_000);
-            _testJobType.GetProperty("TotalTests").SetValue(job, null);
-            _testJobType.GetProperty("InitTimeoutMs").SetValue(job, 0L); // Use default
+            _testJobType.GetProperty("Mode").SetValue(job, mode);
+            _testJobType.GetProperty("StartedUnixMs").SetValue(job, now - startedMsAgo);
+            _testJobType.GetProperty("LastUpdateUnixMs").SetValue(job, now - startedMsAgo);
+            _testJobType.GetProperty("TotalTests").SetValue(job, null); // Not initialized yet
+            _testJobType.GetProperty("InitTimeoutMs").SetValue(job, initTimeoutMs); // 0 = use default
             _testJobType.GetProperty("FailuresSoFar").SetValue(job, new List<TestJobFailure>());
 
-            jobs["test-init-timeout-default"] = job;
-            _currentJobIdField.SetValue(null, "test-init-timeout-default");
+            jobs[jobId] = job;
+            _currentJobIdField.SetValue(null, jobId);
+            return job;
+        }
 
-            // Act: GetJob should auto-fail because 20s > 15s default
-            var result = _getJobMethod.Invoke(null, new object[] { "test-init-timeout-default" });
-
-            // Assert: job should be failed
-            var status = (TestJobStatus)_testJobType.GetProperty("Status").GetValue(result);
-            Assert.AreEqual(TestJobStatus.Failed, status,
-                "Job with default timeout should auto-fail after 20s");
+        private TestJobStatus StatusOf(object job)
+        {
+            return (TestJobStatus)_testJobType.GetProperty("Status").GetValue(job);
         }
 
         [Test]

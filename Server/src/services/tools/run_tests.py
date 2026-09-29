@@ -168,8 +168,8 @@ async def run_tests(
     include_details: Annotated[bool,
                                "Include details for all tests (default: false)"] = False,
     init_timeout: Annotated[int | None,
-                            "Initialization timeout in milliseconds. PlayMode tests may need longer "
-                            "due to domain reload (default: 15000). Recommended: 120000 for PlayMode."] = None,
+                            "Initialization timeout in milliseconds: how long the tests may take to start "
+                            "(domain reload) before the job fails (default: 120000, max: 600000)."] = None,
 ) -> RunTestsStartResponse | MCPResponse:
     if init_timeout is not None and init_timeout <= 0:
         return MCPResponse(success=False, error="init_timeout must be a positive integer (milliseconds) or None")
