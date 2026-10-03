@@ -316,6 +316,8 @@ class UnityInstanceMiddleware(Middleware):
             raw = msg_args.pop("unity_instance")
             if raw is not None:
                 raw_str = str(raw).strip()
+                if not raw_str and (config.transport_mode or "stdio").lower() != "http":
+                    raise ValueError("unity_instance must not be empty or whitespace")
                 if raw_str:
                     # Raises ValueError with a user-friendly message on invalid input.
                     active_instance = await self._resolve_instance_value(raw_str, ctx)

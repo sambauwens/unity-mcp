@@ -543,6 +543,76 @@ class StdioInstancePinningTests(unittest.TestCase):
         self.probes.assert_not_called()
         self.assertEqual([], self.socket_attempts)
 
+    def _inject_then_connect(self, middleware, context, arguments):
+        request = SimpleNamespace(fastmcp_context=context,
+                                  message=SimpleNamespace(name="manage_scene", arguments=arguments))
+
+        async def run():
+            await middleware._inject_unity_instance(request)
+            return self.pool.get_connection(await context.get_state("unity_instance"))
+        return asyncio.run(run())
+
+    def test_explicit_blank_hint_rejects_before_stored_other_pin(self):
+        for hint in ("", "   ", "\t\r\n"):
+            with self.subTest(hint=hint):
+                middleware = self._middleware()
+                context = RequestContext()
+                asyncio.run(middleware.set_active_instance(context, OTHER))
+                with self.assertRaisesRegex(ValueError, "must not be empty"):
+                    self._inject_then_connect(middleware, context, {"unity_instance": hint})
+                self.probes.assert_not_called()
+                self.assertEqual([], self.socket_attempts)
+
+    def test_explicit_blank_hint_rejects_before_configured_other_default(self):
+        os.environ["UNITY_MCP_DEFAULT_INSTANCE"] = "Other"
+        self.pool = unity_connection.UnityConnectionPool()
+        unity_connection._unity_connection_pool = self.pool
+        for hint in ("", "   ", "\t\r\n"):
+            with self.subTest(hint=hint):
+                with self.assertRaisesRegex(ValueError, "must not be empty"):
+                    self._inject_then_connect(self._middleware(), RequestContext(), {"unity_instance": hint})
+                self.probes.assert_not_called()
+                self.assertEqual([], self.socket_attempts)
+
+    def test_omitted_hint_preserves_stored_selection(self):
+        middleware = self._middleware()
+        context = RequestContext()
+        asyncio.run(middleware.set_active_instance(context, OTHER))
+        connection = self._inject_then_connect(middleware, context, {})
+        self.assertEqual(OTHER, connection.instance_id)
+        self.assertEqual([("127.0.0.1", OTHER_PORT)], self.socket_attempts)
+        self.probes.assert_not_called()
+
+    def test_optional_null_hint_preserves_stored_selection(self):
+        middleware = self._middleware()
+        context = RequestContext()
+        asyncio.run(middleware.set_active_instance(context, OTHER))
+        connection = self._inject_then_connect(middleware, context, {"unity_instance": None})
+        self.assertEqual(OTHER, connection.instance_id)
+        self.assertEqual([("127.0.0.1", OTHER_PORT)], self.socket_attempts)
+        self.probes.assert_not_called()
+
+    def test_optional_null_hint_preserves_configured_default(self):
+        os.environ["UNITY_MCP_DEFAULT_INSTANCE"] = "Tools"
+        self.pool = unity_connection.UnityConnectionPool()
+        unity_connection._unity_connection_pool = self.pool
+        connection = self._inject_then_connect(self._middleware(), RequestContext(), {"unity_instance": None})
+        self.assertEqual(TARGET, connection.instance_id)
+        self.assertEqual([("127.0.0.1", TARGET_PORT)], self.socket_attempts)
+        self.probes.assert_not_called()
+
+    def test_http_blank_hint_scope_is_unchanged(self):
+        middleware = self._middleware()
+        context = RequestContext()
+        asyncio.run(middleware.set_active_instance(context, OTHER))
+        config.transport_mode = "http"
+        request = SimpleNamespace(fastmcp_context=context,
+                                  message=SimpleNamespace(name="manage_scene", arguments={"unity_instance": " "}))
+        asyncio.run(middleware._inject_unity_instance(request))
+        self.assertEqual(OTHER, context.state.get("unity_instance"))
+        self.probes.assert_not_called()
+        self.assertEqual([], self.socket_attempts)
+
     def test_set_active_instance_records_selection_without_connection_claim(self):
         from services.tools.set_active_instance import set_active_instance
         middleware = self._middleware()
