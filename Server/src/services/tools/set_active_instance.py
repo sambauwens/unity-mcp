@@ -25,37 +25,27 @@ async def set_active_instance(
 ) -> dict[str, Any]:
     transport = (config.transport_mode or "stdio").lower()
 
-    # Port number shorthand (stdio only) — resolve to Name@hash via pool discovery
-    value = (instance or "").strip()
-    if value.isdigit():
-        if transport == "http":
-            return {
-                "success": False,
-                "error": f"Port-based targeting ('{value}') is not supported in HTTP transport mode. "
-                         "Use Name@hash or a hash prefix. Read mcpforunity://instances for available instances."
-            }
-        port_int = int(value)
-        pool = get_unity_connection_pool()
-        instances = pool.discover_all_instances(force_refresh=True)
-        match = next((inst for inst in instances if getattr(inst, "port", None) == port_int), None)
-        if match is None:
-            available = ", ".join(
-                f"{inst.id} (port {getattr(inst, 'port', '?')})" for inst in instances
-            ) or "none"
-            return {
-                "success": False,
-                "error": f"No Unity instance found on port {value}. Available: {available}."
-            }
-        resolved_id = match.id
+    if transport != "http":
+        try:
+            selected = get_unity_connection_pool().resolve_instance_descriptor((instance or "").strip())
+        except ConnectionError as exc:
+            return {"success": False, "error": str(exc)}
         middleware = get_unity_instance_middleware()
-        await middleware.set_active_instance(ctx, resolved_id)
+        await middleware.set_active_instance(ctx, selected.id)
         return {
             "success": True,
-            "message": f"Active instance set to {resolved_id}",
-            "data": {
-                "instance": resolved_id,
-                "session_key": await middleware.get_session_key(ctx),
-            },
+            "message": f"Selection recorded from descriptor: {selected.id}; live connection unverified",
+            "data": {"instance": selected.id, "metadata_only": True,
+                     "session_key": await middleware.get_session_key(ctx)},
+        }
+
+    # Port-based selection is not supported by the HTTP transport.
+    value = (instance or "").strip()
+    if value.isdigit():
+        return {
+            "success": False,
+            "error": f"Port-based targeting ('{value}') is not supported in HTTP transport mode. "
+                     "Use Name@hash or a hash prefix. Read mcpforunity://instances for available instances."
         }
 
     # Discover running instances based on transport
@@ -78,10 +68,6 @@ async def set_active_instance(
                 name=project,
                 session_id=session_id,
             ))
-    else:
-        pool = get_unity_connection_pool()
-        instances = pool.discover_all_instances(force_refresh=True)
-
     if not instances:
         return {
             "success": False,

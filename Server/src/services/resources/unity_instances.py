@@ -1,5 +1,5 @@
 """
-Resource to list all available Unity Editor instances.
+Resource to list HTTP sessions or unverified stdio advertisements.
 """
 from typing import Any
 
@@ -13,11 +13,11 @@ from core.config import config
 @mcp_for_unity_resource(
     uri="mcpforunity://instances",
     name="unity_instances",
-    description="Lists all running Unity Editor instances with their details.\n\nURI: mcpforunity://instances"
+    description="Lists HTTP sessions or unverified stdio status descriptors without probing.\n\nURI: mcpforunity://instances"
 )
 async def unity_instances(ctx: Context) -> dict[str, Any]:
     """
-    List all available Unity Editor instances.
+    List HTTP sessions or metadata-only stdio descriptors, without claiming stdio liveness.
 
     Returns information about each instance including:
     - id: Unique identifier (ProjectName@hash)
@@ -25,7 +25,7 @@ async def unity_instances(ctx: Context) -> dict[str, Any]:
     - path: Full project path (stdio only)
     - hash: 8-character hash of project path
     - port: TCP port number (stdio only)
-    - status: Current status (running, reloading, etc.) (stdio only)
+    - status: Unverified descriptor status (stdio only)
     - last_heartbeat: Last heartbeat timestamp (stdio only)
     - unity_version: Unity version (if available)
     - connected_at: Connection timestamp (HTTP only)
@@ -88,14 +88,15 @@ async def unity_instances(ctx: Context) -> dict[str, Any]:
 
             return result
         else:
-            # Stdio/TCP transport: query connection pool
+            # Stdio inventory describes advertisements; it does not probe endpoints.
             pool = get_unity_connection_pool()
-            instances = pool.discover_all_instances(force_refresh=False)
+            descriptors = pool.describe_instances()
 
             # Check for duplicate project names
             name_counts = {}
-            for inst in instances:
-                name_counts[inst.name] = name_counts.get(inst.name, 0) + 1
+            for descriptor in descriptors:
+                name = descriptor["name"]
+                name_counts[name] = name_counts.get(name, 0) + 1
 
             duplicates = [name for name,
                           count in name_counts.items() if count > 1]
@@ -103,8 +104,10 @@ async def unity_instances(ctx: Context) -> dict[str, Any]:
             result = {
                 "success": True,
                 "transport": transport,
-                "instance_count": len(instances),
-                "instances": [inst.to_dict() for inst in instances],
+                "instance_count": len(descriptors),
+                "instances": descriptors,
+                "metadata_only": True,
+                "availability": "unverified",
             }
 
             if duplicates:

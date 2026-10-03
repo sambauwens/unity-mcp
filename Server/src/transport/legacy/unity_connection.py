@@ -520,6 +520,14 @@ class UnityConnectionPool:
             f"Found {len(instances)} Unity instances: {[inst.id for inst in instances]}")
         return instances
 
+    def describe_instances(self) -> list[dict]:
+        """List status advertisements without any network probes."""
+        return PortDiscovery.read_instance_descriptors()
+
+    def resolve_instance_descriptor(self, instance_identifier: str | None = None) -> UnityInstanceInfo:
+        selection = instance_identifier if instance_identifier is not None else self._default_instance_id
+        return PortDiscovery.resolve_instance_descriptor(selection)
+
     def _resolve_instance_id(self, instance_identifier: str | None, instances: list[UnityInstanceInfo]) -> UnityInstanceInfo:
         """
         Resolve an instance identifier to a specific Unity instance.
@@ -644,11 +652,12 @@ class UnityConnectionPool:
         Raises:
             ConnectionError: If instance cannot be found or connected
         """
-        # Refresh instance list if cache expired
-        instances = self.discover_all_instances()
-
-        # Resolve identifier to specific instance
-        target = self._resolve_instance_id(instance_identifier, instances)
+        selection = instance_identifier if instance_identifier is not None else self._default_instance_id
+        if selection is not None:
+            target = self.resolve_instance_descriptor(selection)
+        else:
+            instances = self.discover_all_instances()
+            target = self._resolve_instance_id(None, instances)
 
         # Return existing connection or create new one
         with self._pool_lock:
@@ -669,6 +678,7 @@ class UnityConnectionPool:
                 if conn.port != target.port:
                     logger.info(
                         f"Updating cached port for {target.id}: {conn.port} -> {target.port}")
+                    conn.disconnect()
                     conn.port = target.port
                 logger.debug(f"Reusing existing connection to: {target.id}")
 

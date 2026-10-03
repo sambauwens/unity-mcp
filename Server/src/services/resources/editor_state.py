@@ -134,10 +134,10 @@ def _in_pytest() -> bool:
 
 async def infer_single_instance_id(ctx: Context) -> str | None:
     """
-    Best-effort: if exactly one Unity instance is connected, return its Name@hash id.
-    This makes editor_state outputs self-describing even when no explicit active instance is set.
+    Infer a sole HTTP session or resolve an explicit/default stdio descriptor.
+    A descriptor ID is selection metadata, not authenticated live identity.
     """
-    await ctx.info("If exactly one Unity instance is connected, return its Name@hash id.")
+    await ctx.info("Resolving instance identity from the transport's available evidence.")
 
     transport = (config.transport_mode or "stdio").lower()
 
@@ -160,16 +160,13 @@ async def infer_single_instance_id(ctx: Context) -> str | None:
             return None
         return None
 
-    # Stdio/TCP transport: derive from connection pool discovery.
+    # Stdio inference can describe only an explicit/default selection, never a sole advertisement.
     try:
         from transport.legacy.unity_connection import get_unity_connection_pool
 
         pool = get_unity_connection_pool()
-        instances = pool.discover_all_instances(force_refresh=False)
-        if isinstance(instances, list) and len(instances) == 1:
-            inst = instances[0]
-            inst_id = getattr(inst, "id", None)
-            return str(inst_id) if inst_id else None
+        selection = await ctx.get_state("unity_instance")
+        return pool.resolve_instance_descriptor(selection).id
     except Exception:
         return None
     return None

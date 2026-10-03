@@ -8,13 +8,9 @@ import time
 
 from core.config import config
 from models.models import UnityInstanceInfo
-from transport.legacy.port_discovery import PortDiscovery
+from transport.legacy.port_discovery import PortDiscovery, UnityInstanceUnavailableError
 
 logger = logging.getLogger("mcp-for-unity-server")
-
-
-class UnityInstanceUnavailableError(ConnectionError):
-    """The selected editor could not be resolved to an available valid port."""
 
 
 class StdioPortRegistry:
@@ -42,9 +38,9 @@ class StdioPortRegistry:
             return list(self._instances.values())
 
     def get_instance(self, instance_id: str | None, *, force_refresh: bool = False) -> UnityInstanceInfo | None:
-        instances = self.get_instances(force_refresh=force_refresh)
         if instance_id:
-            return next((inst for inst in instances if inst.id == instance_id), None)
+            return PortDiscovery.resolve_instance_descriptor(instance_id)
+        instances = self.get_instances(force_refresh=force_refresh)
         if not instances:
             return None
 
@@ -57,18 +53,13 @@ class StdioPortRegistry:
     def get_port(self, instance_id: str | None = None) -> int:
         if instance_id:
             try:
-                instance = self.get_instance(instance_id, force_refresh=True)
+                return self.get_instance(instance_id).port
+            except UnityInstanceUnavailableError:
+                raise
             except Exception as exc:
                 raise UnityInstanceUnavailableError(
                     f"Selected Unity instance '{instance_id}' could not be discovered: {exc}"
                 ) from exc
-            port = instance.port if instance is not None else None
-            if type(port) is not int or not 1 <= port <= 65535:
-                raise UnityInstanceUnavailableError(
-                    f"Selected Unity instance '{instance_id}' is unavailable or has an invalid port"
-                )
-            return port
-
         instance = self.get_instance(None)
         if instance and isinstance(instance.port, int):
             return instance.port

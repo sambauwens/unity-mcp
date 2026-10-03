@@ -196,11 +196,19 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         else:
             # Initialize connection pool and discover instances
             _unity_connection_pool = get_unity_connection_pool()
-            instances = _unity_connection_pool.discover_all_instances()
+            selected_stdio = ((config.transport_mode or "stdio").lower() != "http" and
+                              bool(os.environ.get("UNITY_MCP_DEFAULT_INSTANCE", "").strip()))
+            if selected_stdio:
+                instances = [_unity_connection_pool.resolve_instance_descriptor()]
+            else:
+                instances = _unity_connection_pool.discover_all_instances()
 
             if instances:
                 logger.info(
-                    f"Discovered {len(instances)} Unity instance(s): {[i.id for i in instances]}")
+                    "%s %d Unity instance(s): %s",
+                    "Advertised selected" if selected_stdio else "Discovered",
+                    len(instances), [instance.id for instance in instances],
+                )
 
                 # Try to connect to default instance
                 try:

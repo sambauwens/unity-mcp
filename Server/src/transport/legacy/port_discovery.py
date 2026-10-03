@@ -12,6 +12,7 @@ What changed and why:
 """
 
 import glob
+from hashlib import sha1
 import json
 import logging
 import os
@@ -23,6 +24,10 @@ import struct
 from models.models import UnityInstanceInfo
 
 logger = logging.getLogger("mcp-for-unity-server")
+
+
+class UnityInstanceUnavailableError(ConnectionError):
+    """An explicit selection has no unique valid advertised descriptor."""
 
 
 class PortDiscovery:
@@ -221,6 +226,111 @@ class PortDiscovery:
             return name if name else "Unknown"
         except Exception:
             return "Unknown"
+
+    @staticmethod
+    def read_instance_descriptors() -> list[dict]:
+        """Read advertisements without probing, deduplicating, or claiming liveness."""
+        descriptors = []
+        pattern = str(PortDiscovery.get_registry_dir() / "unity-mcp-status-*.json")
+        for file_path in glob.glob(pattern):
+            path = Path(file_path)
+            instance_hash = path.name.removeprefix("unity-mcp-status-").removesuffix(".json").lower()
+            record = {
+                "id": None, "name": None, "path": None, "hash": instance_hash,
+                "port": None, "status": "unverified", "last_heartbeat": None,
+                "unity_version": None, "descriptor_error": None,
+            }
+            try:
+                with path.open("r", encoding="utf-8") as stream:
+                    data = json.load(stream)
+                if not isinstance(data, dict):
+                    raise ValueError("descriptor must be a JSON object")
+                project_path = data.get("project_path")
+                record["path"] = project_path if isinstance(project_path, str) else None
+                name_path = project_path.rstrip("/\\") if isinstance(project_path, str) else ""
+                if name_path.lower().endswith("/assets") or name_path.lower().endswith("\\assets"):
+                    name_path = name_path[:-6].rstrip("/\\")
+                    record["name"] = name_path.replace("\\", "/").rsplit("/", 1)[-1] or None
+                elif isinstance(data.get("project_name"), str):
+                    record["name"] = data["project_name"]
+                if record["name"]:
+                    record["id"] = f"{record['name']}@{instance_hash}"
+                record["port"] = data.get("unity_port")
+                record["last_heartbeat"] = data.get("last_heartbeat")
+                record["unity_version"] = data.get("unity_version")
+
+                if record["unity_version"] is not None and not isinstance(record["unity_version"], str):
+                    raise ValueError("unity_version must be a string")
+
+                if not isinstance(project_path, str) or not project_path:
+                    raise ValueError("project_path is missing or invalid")
+                absolute = (project_path.startswith(("/", "\\\\")) or
+                            (len(project_path) > 2 and project_path[1] == ":" and project_path[2] in "/\\"))
+                if not absolute or not project_path.rstrip("/\\").lower().endswith(("/assets", "\\assets")):
+                    raise ValueError("project_path must identify an absolute Assets directory")
+                if not record["name"] or data.get("project_name", record["name"]) != record["name"]:
+                    raise ValueError("project name disagrees with project_path")
+                expected_hash = sha1(project_path.encode("utf-8")).hexdigest()[:8]
+                if instance_hash != expected_hash:
+                    raise ValueError("descriptor filename hash disagrees with project_path")
+                port = record["port"]
+                if type(port) is not int or not 1 <= port <= 65535:
+                    raise ValueError("unity_port must be an integer from 1 to 65535")
+                heartbeat = record["last_heartbeat"]
+                if heartbeat is not None:
+                    if not isinstance(heartbeat, str):
+                        raise ValueError("last_heartbeat must be a timestamp string")
+                    datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
+            except (OSError, ValueError, TypeError, UnicodeError) as exc:
+                record["descriptor_error"] = str(exc)
+            descriptors.append(record)
+        return descriptors
+
+    @staticmethod
+    def resolve_instance_descriptor(identifier: str) -> UnityInstanceInfo:
+        """Resolve one valid descriptor before any command connection is opened."""
+        value = identifier.strip() if isinstance(identifier, str) else ""
+        if not value:
+            raise UnityInstanceUnavailableError("An explicit Unity instance selection is required")
+        records = PortDiscovery.read_instance_descriptors()
+        matches = [record for record in records if record["id"] == value]
+        if not matches and "@" in value:
+            name, hint = value.split("@", 1)
+            if not name or not hint:
+                raise UnityInstanceUnavailableError(f"Selected Unity instance '{value}' is invalid")
+            matches = [record for record in records
+                       if record["name"] in (name, None) and
+                       (record["hash"].startswith(hint.lower()) or str(record["port"]) == hint)]
+        if not matches and "@" not in value:
+            if value.isdigit():
+                matches = [record for record in records if str(record["port"]) == value]
+            else:
+                matches = [record for record in records if record["name"] == value or record["path"] == value]
+                if matches and any(record["name"] is None and record["descriptor_error"] for record in records):
+                    raise UnityInstanceUnavailableError(
+                        f"Selected Unity instance '{value}' cannot be resolved with unreadable descriptors"
+                    )
+                if not matches:
+                    matches = [record for record in records if record["hash"].startswith(value.lower())]
+        if len(matches) != 1:
+            reason = "ambiguous" if matches else "unavailable"
+            raise UnityInstanceUnavailableError(f"Selected Unity instance '{value}' is {reason}")
+        selected = matches[0]
+        if selected["descriptor_error"]:
+            raise UnityInstanceUnavailableError(
+                f"Selected Unity instance '{value}' has an invalid descriptor: {selected['descriptor_error']}"
+            )
+        if any(record is not selected and record["port"] == selected["port"] for record in records):
+            raise UnityInstanceUnavailableError(
+                f"Selected Unity instance '{value}' has conflicting port ownership"
+            )
+        heartbeat = selected["last_heartbeat"]
+        return UnityInstanceInfo(
+            id=selected["id"], name=selected["name"], path=selected["path"], hash=selected["hash"],
+            port=selected["port"], status="unverified",
+            last_heartbeat=datetime.fromisoformat(heartbeat.replace("Z", "+00:00")) if heartbeat else None,
+            unity_version=selected["unity_version"],
+        )
 
     @staticmethod
     def discover_all_unity_instances() -> list[UnityInstanceInfo]:

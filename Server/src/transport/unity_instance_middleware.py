@@ -109,13 +109,17 @@ class UnityInstanceMiddleware(Middleware):
 
     async def _discover_instances(self, ctx) -> list:
         """
-        Return running Unity instances across both HTTP (PluginHub) and stdio transports.
+        Return HTTP session information or unverified stdio descriptor metadata.
 
         Returns a list of objects with .id (Name@hash) and .hash attributes.
         """
         from types import SimpleNamespace
         transport = (config.transport_mode or "stdio").lower()
         results: list = []
+
+        if transport != "http":
+            from transport.legacy.unity_connection import get_unity_connection_pool
+            return [SimpleNamespace(**record) for record in get_unity_connection_pool().describe_instances()]
 
         if PluginHub.is_configured():
             try:
@@ -139,16 +143,6 @@ class UnityInstanceMiddleware(Middleware):
                     raise
                 logger.debug("PluginHub instance discovery failed (%s)", type(exc).__name__, exc_info=True)
 
-        if not results and transport != "http":
-            try:
-                from transport.legacy.unity_connection import get_unity_connection_pool
-                pool = get_unity_connection_pool()
-                results = pool.discover_all_instances(force_refresh=True)
-            except Exception as exc:
-                if isinstance(exc, (SystemExit, KeyboardInterrupt)):
-                    raise
-                logger.debug("Stdio instance discovery failed (%s)", type(exc).__name__, exc_info=True)
-
         return results
 
     async def _resolve_instance_value(self, value: str, ctx) -> str:
@@ -168,24 +162,18 @@ class UnityInstanceMiddleware(Middleware):
 
         transport = (config.transport_mode or "stdio").lower()
 
-        # Port number (stdio only) — resolve to Name@hash via status file lookup
+        if transport != "http":
+            from transport.legacy.unity_connection import get_unity_connection_pool
+            try:
+                return get_unity_connection_pool().resolve_instance_descriptor(value).id
+            except ConnectionError as exc:
+                raise ValueError(str(exc)) from exc
+
+        # Port-based selection is not supported by the HTTP transport.
         if value.isdigit():
-            if transport == "http":
-                raise ValueError(
-                    f"Port-based targeting ('{value}') is not supported in HTTP transport mode. "
-                    "Use Name@hash or a hash prefix. Read mcpforunity://instances for available instances."
-                )
-            port_int = int(value)
-            instances = await self._discover_instances(ctx)
-            for inst in instances:
-                if getattr(inst, "port", None) == port_int:
-                    return inst.id
-            available = ", ".join(
-                f"{getattr(i, 'id', '?')} (port {getattr(i, 'port', '?')})"
-                for i in instances
-            ) or "none"
             raise ValueError(
-                f"No Unity instance found on port {value}. Available: {available}."
+                f"Port-based targeting ('{value}') is not supported in HTTP transport mode. "
+                "Use Name@hash or a hash prefix. Read mcpforunity://instances for available instances."
             )
 
         instances = await self._discover_instances(ctx)
@@ -227,12 +215,15 @@ class UnityInstanceMiddleware(Middleware):
 
     async def _maybe_autoselect_instance(self, ctx) -> str | None:
         """
-        Auto-select the sole Unity instance when no active instance is set.
+        Auto-select a sole HTTP session; stdio selection belongs to its command path.
 
         Note: This method both *discovers* and *persists* the selection via
         `set_active_instance` as a side-effect, since callers expect the selection
         to stick for subsequent tool/resource calls in the same session.
         """
+        # Stdio selection belongs to the explicit/default command path, not metadata inspection.
+        if (config.transport_mode or "stdio").lower() != "http":
+            return None
         # A configured default instance (--default-instance / UNITY_MCP_DEFAULT_INSTANCE) wins: leave the
         # selection empty so the connection pool resolves the default. Auto-selecting "the sole running
         # editor" here would pin this session to another project's editor whenever its own is not open.
@@ -283,43 +274,6 @@ class UnityInstanceMiddleware(Middleware):
                         exc_info=True,
                     )
 
-            if transport != "http":
-                try:
-                    # Import here to avoid circular imports in legacy transport paths.
-                    from transport.legacy.unity_connection import get_unity_connection_pool
-
-                    pool = get_unity_connection_pool()
-                    instances = pool.discover_all_instances(force_refresh=True)
-                    ids = [getattr(inst, "id", None) for inst in instances]
-                    ids = [inst_id for inst_id in ids if inst_id]
-                    if len(ids) == 1:
-                        chosen = ids[0]
-                        await self.set_active_instance(ctx, chosen)
-                        logger.info(
-                            "Auto-selected sole Unity instance via stdio discovery: %s",
-                            chosen,
-                        )
-                        return chosen
-                    if len(ids) > 1:
-                        logger.info(
-                            "Multiple Unity instances found (%d). Pass unity_instance on any tool call "
-                            "or call set_active_instance to choose one. Available: %s",
-                            len(ids), ", ".join(ids),
-                        )
-                except (ConnectionError, ValueError, KeyError, TimeoutError, AttributeError) as exc:
-                    logger.debug(
-                        "Stdio auto-select probe failed (%s)",
-                        type(exc).__name__,
-                        exc_info=True,
-                    )
-                except Exception as exc:
-                    if isinstance(exc, (SystemExit, KeyboardInterrupt)):
-                        raise
-                    logger.debug(
-                        "Stdio auto-select probe failed with unexpected error (%s)",
-                        type(exc).__name__,
-                        exc_info=True,
-                    )
         except Exception as exc:
             if isinstance(exc, (SystemExit, KeyboardInterrupt)):
                 raise
