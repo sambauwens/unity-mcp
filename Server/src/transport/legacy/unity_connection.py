@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from models.models import MCPResponse, UnityInstanceInfo
-from transport.legacy.stdio_port_registry import stdio_port_registry
+from transport.legacy.stdio_port_registry import stdio_port_registry, UnityInstanceUnavailableError
 from utils import editor_dialogs
 
 
@@ -58,6 +58,8 @@ class UnityConnection:
             if self.sock:
                 return True
             try:
+                if self.instance_id:
+                    self.port = stdio_port_registry.get_port(self.instance_id)
                 # Bounded connect to avoid indefinite blocking
                 connect_timeout = float(
                     getattr(config, "connection_timeout", 1.0))
@@ -107,6 +109,9 @@ class UnityConnection:
                 finally:
                     self.sock.settimeout(config.connection_timeout)
                 return True
+            except UnityInstanceUnavailableError:
+                self.port = None
+                raise
             except Exception as e:
                 logger.error(f"Failed to connect to Unity: {str(e)}")
                 try:
@@ -399,6 +404,10 @@ class UnityConnection:
                         'message', 'Unknown Unity error')
                     raise Exception(err)
                 return resp.get('result', {})
+            except UnityInstanceUnavailableError:
+                self.disconnect()
+                self.port = None
+                raise
             except Exception as e:
                 logger.warning(
                     f"Unity communication attempt {attempt+1} failed: {e}")
@@ -410,31 +419,14 @@ class UnityConnection:
 
                 # Re-discover the port for this specific instance
                 try:
-                    new_port: int | None = None
-                    if self.instance_id:
-                        # Try to rediscover the specific instance via shared registry
-                        refreshed_instance = stdio_port_registry.get_instance(
-                            self.instance_id)
-                        if refreshed_instance and isinstance(refreshed_instance.port, int):
-                            new_port = refreshed_instance.port
-                            logger.debug(
-                                f"Rediscovered instance {self.instance_id} on port {new_port}")
-                        else:
-                            logger.warning(
-                                f"Instance {self.instance_id} not found during reconnection; falling back to port scan",
-                            )
-
-                    # Fallback to registry default if instance-specific discovery failed
-                    if new_port is None:
-                        new_port = stdio_port_registry.get_port(
-                            self.instance_id)
-                        logger.info(
-                            f"Using Unity port from stdio_port_registry: {new_port}")
-
+                    new_port = stdio_port_registry.get_port(self.instance_id)
                     if new_port != self.port:
                         logger.info(
                             f"Unity port changed {self.port} -> {new_port}")
                     self.port = new_port
+                except UnityInstanceUnavailableError:
+                    self.port = None
+                    raise
                 except Exception as de:
                     logger.debug(f"Port discovery failed: {de}")
 

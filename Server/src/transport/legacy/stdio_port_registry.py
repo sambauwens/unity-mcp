@@ -13,6 +13,10 @@ from transport.legacy.port_discovery import PortDiscovery
 logger = logging.getLogger("mcp-for-unity-server")
 
 
+class UnityInstanceUnavailableError(ConnectionError):
+    """The selected editor could not be resolved to an available valid port."""
+
+
 class StdioPortRegistry:
     """Caches Unity instance discovery results for STDIO transport."""
 
@@ -37,8 +41,8 @@ class StdioPortRegistry:
             self._refresh_locked()
             return list(self._instances.values())
 
-    def get_instance(self, instance_id: str | None) -> UnityInstanceInfo | None:
-        instances = self.get_instances()
+    def get_instance(self, instance_id: str | None, *, force_refresh: bool = False) -> UnityInstanceInfo | None:
+        instances = self.get_instances(force_refresh=force_refresh)
         if instance_id:
             return next((inst for inst in instances if inst.id == instance_id), None)
         if not instances:
@@ -51,7 +55,21 @@ class StdioPortRegistry:
         return max(instances, key=_instance_sort_key)
 
     def get_port(self, instance_id: str | None = None) -> int:
-        instance = self.get_instance(instance_id)
+        if instance_id:
+            try:
+                instance = self.get_instance(instance_id, force_refresh=True)
+            except Exception as exc:
+                raise UnityInstanceUnavailableError(
+                    f"Selected Unity instance '{instance_id}' could not be discovered: {exc}"
+                ) from exc
+            port = instance.port if instance is not None else None
+            if type(port) is not int or not 1 <= port <= 65535:
+                raise UnityInstanceUnavailableError(
+                    f"Selected Unity instance '{instance_id}' is unavailable or has an invalid port"
+                )
+            return port
+
+        instance = self.get_instance(None)
         if instance and isinstance(instance.port, int):
             return instance.port
         return PortDiscovery.discover_unity_port()
