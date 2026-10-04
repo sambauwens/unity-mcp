@@ -78,7 +78,7 @@ async def find_gameobjects(
             "message": "Missing required parameter 'search_term'. Specify what to search for."
         }
 
-    gate = await preflight(ctx, wait_for_no_compile=True, refresh_if_dirty=True)
+    gate = await preflight(ctx, wait_for_no_compile=True, refresh_if_dirty=False)
     if gate is not None:
         return gate.model_dump()
 

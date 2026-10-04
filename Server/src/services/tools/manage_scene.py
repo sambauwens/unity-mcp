@@ -67,8 +67,9 @@ def _extract_images(response: dict[str, Any], action: str) -> ToolResult | None:
 @mcp_for_unity_tool(
     description=(
         "Performs CRUD operations on Unity scenes. "
-        "Read-only actions: get_hierarchy, get_active, get_build_settings, screenshot, scene_view_frame. "
-        "Modifying actions: create, load, save. "
+        "Read-only data actions: get_hierarchy, get_active, get_build_settings. "
+        "Driver-only actions: create, load, save, screenshot, scene_view_frame. "
+        "Screenshot and Scene View actions can import assets, create cameras or change editor views. "
         "screenshot supports include_image=true to return an inline base64 PNG for AI vision. "
         "screenshot with batch='surround' captures 6 angles around the scene (no file saved) for comprehensive scene understanding. "
         "screenshot with batch='orbit' captures configurable azimuth x elevation grid for visual QA (use orbit_angles, orbit_elevations, orbit_distance, orbit_fov). "
@@ -151,7 +152,10 @@ async def manage_scene(
                                  "If true, include local transform in node summaries."] | None = None,
 ) -> dict[str, Any] | ToolResult:
     unity_instance = await get_unity_instance_from_context(ctx)
-    gate = await preflight(ctx, wait_for_no_compile=True, refresh_if_dirty=True)
+    gate = await preflight(
+        ctx, wait_for_no_compile=True,
+        refresh_if_dirty=action not in ("get_hierarchy", "get_active", "get_build_settings"),
+    )
     if gate is not None:
         return gate.model_dump()
     try:
