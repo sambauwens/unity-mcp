@@ -293,6 +293,13 @@ namespace MCPForUnity.Editor.Services
                 return;
             }
 
+            // A real editor tick proves liveness even when the cached state is unchanged.
+            _lastUpdateTimeSinceStartup = now;
+            lock (LockObj)
+            {
+                _observedUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
+
             // Fast state-change detection BEFORE building snapshot.
             // This avoids the expensive BuildSnapshot() call entirely when nothing changed.
             // These checks are much cheaper than building a full JSON snapshot.
@@ -354,7 +361,6 @@ namespace MCPForUnity.Editor.Services
             _lastTrackedTestsRunning = testsRunning;
             _lastTrackedActivityPhase = activityPhase;
 
-            _lastUpdateTimeSinceStartup = now;
             ForceUpdate("tick");
         }
 
@@ -516,14 +522,12 @@ namespace MCPForUnity.Editor.Services
                 // which prevents unnecessary _cached rebuilds, not from caching the clone.
                 var clone = (JObject)_cached.DeepClone();
 
-                // When Unity is backgrounded, OnUpdate is throttled and the
-                // cached timestamp grows stale even though the data is current.
-                // Re-stamp only in that case so the server-side staleness check
-                // still fires for genuinely unresponsive editors when focused.
-                if (!InternalEditorUtility.isApplicationActive)
-                {
-                    clone["observed_at_unix_ms"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                }
+                // Focused reads use the last editor observation, including idle ticks.
+                // Keep the existing background restamp without making a focused,
+                // unresponsive editor appear live just because its snapshot is read.
+                clone["observed_at_unix_ms"] = !InternalEditorUtility.isApplicationActive
+                    ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                    : _observedUnixMs;
 
                 return clone;
             }
