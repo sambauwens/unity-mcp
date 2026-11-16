@@ -259,9 +259,8 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     currentUnityPort = PortManager.GetPortWithFallback();
 
                     // Clear any stale "reloading" heartbeat from a previous domain reload.
-                    // After reload, static fields reset (isRunning=false), so Stop() above
-                    // is a no-op and won't delete the status file. Writing now ensures clients
-                    // see reloading=false even if listener creation fails below.
+                    // Stop() above removes this project's prior status file even when not running.
+                    // Writing now ensures clients see reloading=false even if listener creation fails below.
                     WriteHeartbeat(false, "starting");
 
                     LogBreadcrumb("Start");
@@ -378,6 +377,7 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             {
                 if (!isRunning)
                 {
+                    RemoveOwnStatusFile();
                     return;
                 }
 
@@ -422,6 +422,13 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             try { EditorApplication.quitting -= Stop; } catch { }
             RestoreThrottling();
 
+            RemoveOwnStatusFile();
+
+            if (IsDebugEnabled()) McpLog.Info("StdioBridgeHost stopped.");
+        }
+
+        private static void RemoveOwnStatusFile()
+        {
             try
             {
                 string dir = Environment.GetEnvironmentVariable("UNITY_MCP_STATUS_DIR");
@@ -440,26 +447,44 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             {
                 if (IsDebugEnabled()) McpLog.Warn($"Failed to delete status file: {ex.Message}");
             }
-
-            if (IsDebugEnabled()) McpLog.Info("StdioBridgeHost stopped.");
         }
 
         private static async Task ListenerLoopAsync(CancellationToken token)
         {
             while (isRunning && !token.IsCancellationRequested)
             {
+                TcpClient pendingClient = null;
                 try
                 {
-                    TcpClient client = await listener.AcceptTcpClientAsync();
-                    client.Client.SetSocketOption(
+                    pendingClient = await listener.AcceptTcpClientAsync();
+                    lock (clientsLock)
+                    {
+                        if (isRunning && !token.IsCancellationRequested) activeClients.Add(pendingClient);
+                    }
+                    if (!isRunning || token.IsCancellationRequested) continue;
+                    pendingClient.Client.SetSocketOption(
                         SocketOptionLevel.Socket,
                         SocketOptionName.KeepAlive,
                         true
                     );
 
-                    client.ReceiveTimeout = 60000;
+                    pendingClient.ReceiveTimeout = 60000;
 
-                    _ = Task.Run(() => HandleClientAsync(client, token), token);
+                    TcpClient acceptedClient = pendingClient;
+                    _ = Task.Run(async () =>
+                    {
+                        try { await HandleClientAsync(acceptedClient, token).ConfigureAwait(false); }
+                        catch (Exception ex)
+                        {
+                            if (IsDebugEnabled()) McpLog.Info($"Client connection ended: {ex.Message}", always: false);
+                        }
+                        finally
+                        {
+                            lock (clientsLock) { activeClients.Remove(acceptedClient); }
+                            try { acceptedClient.Close(); } catch { }
+                        }
+                    });
+                    pendingClient = null;
                 }
                 catch (ObjectDisposedException)
                 {
@@ -477,6 +502,14 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     if (isRunning && !token.IsCancellationRequested)
                     {
                         if (IsDebugEnabled()) McpLog.Error($"Listener error: {ex.Message}");
+                    }
+                }
+                finally
+                {
+                    if (pendingClient != null)
+                    {
+                        lock (clientsLock) { activeClients.Remove(pendingClient); }
+                        try { pendingClient.Close(); } catch { }
                     }
                 }
             }
@@ -522,23 +555,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     {
                         if (IsDebugEnabled()) McpLog.Warn($"Handshake failed: {ex.Message}");
                         return;
-                    }
-
-                    // In stdio transport there is only ever one active Python server.
-                    // A new connection means the old one is dead — close stale clients so
-                    // their hung ReadFrameAsUtf8Async calls throw and exit cleanly.
-                    TcpClient[] staleClients;
-                    lock (clientsLock)
-                    {
-                        staleClients = activeClients.Where(c => c != client).ToArray();
-                    }
-                    if (staleClients.Length > 0)
-                    {
-                        McpLog.Info($"Closing {staleClients.Length} stale client(s) after new connection");
-                        foreach (var stale in staleClients)
-                        {
-                            try { stale.Close(); } catch { }
-                        }
                     }
 
                     while (isRunning && !token.IsCancellationRequested)
@@ -628,8 +644,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                                 msg.IndexOf("Connection closed before reading expected bytes", StringComparison.OrdinalIgnoreCase) >= 0
                                 || msg.IndexOf("Read timed out", StringComparison.OrdinalIgnoreCase) >= 0
                                 || ex is IOException
-                                // The bridge itself disposes a stale client's stream ("Closing N stale client(s)"), and a
-                                // domain reload tears streams down; the pending read then throws this. Upstream does the same.
                                 || ex is ObjectDisposedException;
                             if (isBenign)
                             {

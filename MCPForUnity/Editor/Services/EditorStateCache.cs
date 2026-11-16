@@ -37,6 +37,7 @@ namespace MCPForUnity.Editor.Services
         private static string _lastTrackedSceneName;
         private static bool _lastTrackedIsFocused;
         private static bool _lastTrackedIsPlaying;
+        private static bool _lastTrackedIsChanging;
         private static bool _lastTrackedIsPaused;
         private static bool _lastTrackedIsUpdating;
         private static bool _lastTrackedTestsRunning;
@@ -308,6 +309,7 @@ namespace MCPForUnity.Editor.Services
             string sceneName = scene.name ?? string.Empty;
             bool isFocused = InternalEditorUtility.isApplicationActive;
             bool isPlaying = EditorApplication.isPlaying;
+            bool isChanging = EditorApplication.isPlayingOrWillChangePlaymode != isPlaying;
             bool isPaused = EditorApplication.isPaused;
             bool isUpdating = EditorApplication.isUpdating;
             bool testsRunning = TestRunStatus.IsRunning;
@@ -329,7 +331,7 @@ namespace MCPForUnity.Editor.Services
             {
                 activityPhase = "asset_import";
             }
-            else if (EditorApplication.isPlayingOrWillChangePlaymode)
+            else if (isChanging)
             {
                 activityPhase = "playmode_transition";
             }
@@ -339,6 +341,7 @@ namespace MCPForUnity.Editor.Services
                 || _lastTrackedSceneName != sceneName
                 || _lastTrackedIsFocused != isFocused
                 || _lastTrackedIsPlaying != isPlaying
+                || _lastTrackedIsChanging != isChanging
                 || _lastTrackedIsPaused != isPaused
                 || _lastTrackedIsUpdating != isUpdating
                 || _lastTrackedTestsRunning != testsRunning
@@ -356,6 +359,7 @@ namespace MCPForUnity.Editor.Services
             _lastTrackedSceneName = sceneName;
             _lastTrackedIsFocused = isFocused;
             _lastTrackedIsPlaying = isPlaying;
+            _lastTrackedIsChanging = isChanging;
             _lastTrackedIsPaused = isPaused;
             _lastTrackedIsUpdating = isUpdating;
             _lastTrackedTestsRunning = testsRunning;
@@ -397,6 +401,9 @@ namespace MCPForUnity.Editor.Services
             string currentJobId = TestJobManager.CurrentJobId;
             bool isFocused = InternalEditorUtility.isApplicationActive;
 
+            bool isPlaying = EditorApplication.isPlaying;
+            bool isChanging = EditorApplication.isPlayingOrWillChangePlaymode != isPlaying;
+
             var activityPhase = "idle";
             if (testsRunning)
             {
@@ -414,7 +421,7 @@ namespace MCPForUnity.Editor.Services
             {
                 activityPhase = "asset_import";
             }
-            else if (EditorApplication.isPlayingOrWillChangePlaymode)
+            else if (isChanging)
             {
                 activityPhase = "playmode_transition";
             }
@@ -437,9 +444,9 @@ namespace MCPForUnity.Editor.Services
                     IsFocused = isFocused,
                     PlayMode = new EditorStatePlayMode
                     {
-                        IsPlaying = EditorApplication.isPlaying,
+                        IsPlaying = isPlaying,
                         IsPaused = EditorApplication.isPaused,
-                        IsChanging = EditorApplication.isPlayingOrWillChangePlaymode
+                        IsChanging = isChanging
                     },
                     ActiveScene = new EditorStateActiveScene
                     {

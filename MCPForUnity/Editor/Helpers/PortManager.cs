@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -7,6 +8,7 @@ using System.Text;
 using System.Threading;
 using MCPForUnity.Editor.Constants;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
 
@@ -17,6 +19,53 @@ namespace MCPForUnity.Editor.Helpers
     /// </summary>
     public static class PortManager
     {
+        public static void ConfigureProjectPortFromCommandLine()
+        {
+            string[] arguments = Environment.GetCommandLineArgs();
+            string portArgument = null;
+            string projectArgument = null;
+            for (int index = 1; index < arguments.Length; index++)
+            {
+                string argument = arguments[index];
+                if (argument.StartsWith("-mcpUnityPort", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (argument != "-mcpUnityPort" || portArgument != null || index + 1 >= arguments.Length)
+                    {
+                        throw new ArgumentException("Provide exactly one -mcpUnityPort followed by an integer from 1 to 65535.");
+                    }
+                    portArgument = arguments[++index];
+                }
+                else if (argument.StartsWith("-projectPath", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (argument != "-projectPath" || projectArgument != null || index + 1 >= arguments.Length)
+                    {
+                        throw new ArgumentException("Provide exactly one -projectPath for the current Unity project.");
+                    }
+                    projectArgument = arguments[++index];
+                }
+            }
+
+            if (!int.TryParse(portArgument, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out int port) || port < 1 || port > 65535)
+            {
+                throw new ArgumentException("Provide exactly one -mcpUnityPort followed by an integer from 1 to 65535.");
+            }
+            if (string.IsNullOrWhiteSpace(projectArgument))
+            {
+                throw new ArgumentException("Provide exactly one -projectPath for the current Unity project.");
+            }
+            string selectedAssets = Path.GetFullPath(Path.Combine(projectArgument, "Assets"));
+            string actualAssets = Path.GetFullPath(Application.dataPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!string.Equals(selectedAssets, actualAssets, StringComparison.Ordinal))
+            {
+                throw new ArgumentException("The selected project does not match the current Unity application.");
+            }
+
+            MCPForUnity.Editor.Services.Transport.Transports.StdioBridgeHost.Stop();
+            SetPreferredPort(port);
+            MCPForUnity.Editor.Services.Transport.Transports.StdioBridgeHost.Start();
+        }
+
         private static bool IsDebugEnabled()
         {
             try { return EditorPrefs.GetBool(EditorPrefKeys.DebugLogs, false); }
@@ -90,8 +139,9 @@ namespace MCPForUnity.Editor.Helpers
         /// <returns>Available port number</returns>
         private static int FindAvailablePort()
         {
+            var advertisedPorts = ReadAdvertisedPorts();
             // Always try default port first
-            if (IsPortAvailable(DefaultPort))
+            if (!advertisedPorts.Contains(DefaultPort) && IsPortAvailable(DefaultPort))
             {
                 if (IsDebugEnabled()) McpLog.Info($"Using default port {DefaultPort}");
                 return DefaultPort;
@@ -102,7 +152,7 @@ namespace MCPForUnity.Editor.Helpers
             // Search for alternatives
             for (int port = DefaultPort + 1; port < DefaultPort + MaxPortAttempts; port++)
             {
-                if (IsPortAvailable(port))
+                if (!advertisedPorts.Contains(port) && IsPortAvailable(port))
                 {
                     if (IsDebugEnabled()) McpLog.Info($"Found available port {port}");
                     return port;
@@ -110,6 +160,34 @@ namespace MCPForUnity.Editor.Helpers
             }
 
             throw new Exception($"No available ports found in range {DefaultPort}-{DefaultPort + MaxPortAttempts}");
+        }
+
+        private static HashSet<int> ReadAdvertisedPorts()
+        {
+            string directory = Environment.GetEnvironmentVariable("UNITY_MCP_STATUS_DIR");
+            if (string.IsNullOrEmpty(directory))
+            {
+                directory = GetRegistryDirectory();
+            }
+            try
+            {
+                var ports = new HashSet<int>();
+                foreach (string file in Directory.GetFiles(directory, "unity-mcp-status-*.json"))
+                {
+                    JToken portValue = JObject.Parse(File.ReadAllText(file))["unity_port"];
+                    if (portValue == null || portValue.Type != JTokenType.Integer ||
+                        !int.TryParse(portValue.ToString(), out int port) || port < 1 || port > 65535)
+                    {
+                        throw new InvalidOperationException("Unity port advertisements are incomplete; no port was allocated.");
+                    }
+                    ports.Add(port);
+                }
+                return ports;
+            }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is JsonException)
+            {
+                throw new InvalidOperationException("Unity port advertisements could not be read; no port was allocated.");
+            }
         }
 
         /// <summary>

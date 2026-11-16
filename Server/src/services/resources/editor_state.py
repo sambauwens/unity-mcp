@@ -184,10 +184,20 @@ def _enrich_advice_and_staleness(state_v2: dict[str, Any]) -> dict[str, Any]:
     # Conservative default: treat >2s as stale (covers common unfocused-editor throttling).
     is_stale = age_ms > 2000
 
-    compilation = state_v2.get("compilation") or {}
-    tests = state_v2.get("tests") or {}
-    assets = state_v2.get("assets") or {}
-    refresh = (assets.get("refresh") or {}) if isinstance(assets, dict) else {}
+    compilation_value = state_v2.get("compilation")
+    compilation = compilation_value if isinstance(compilation_value, dict) else {}
+    tests_value = state_v2.get("tests")
+    tests = tests_value if isinstance(tests_value, dict) else {}
+    assets_value = state_v2.get("assets")
+    assets = assets_value if isinstance(assets_value, dict) else {}
+    refresh_value = assets.get("refresh")
+    refresh = refresh_value if isinstance(refresh_value, dict) else {}
+    status_known = all(type(value) is bool for value in (
+        compilation.get("is_compiling"),
+        compilation.get("is_domain_reload_pending"),
+        tests.get("is_running"),
+        refresh.get("is_refresh_in_progress"),
+    ))
 
     blocking: list[str] = []
     if compilation.get("is_compiling") is True:
@@ -201,7 +211,9 @@ def _enrich_advice_and_staleness(state_v2: dict[str, Any]) -> dict[str, Any]:
     if is_stale:
         blocking.append("stale_status")
 
-    ready_for_tools = len(blocking) == 0
+    ready_for_tools = False if blocking else True if status_known else None
+    if not status_known:
+        blocking.append("incomplete_status")
 
     state_v2["advice"] = {
         "ready_for_tools": ready_for_tools,
